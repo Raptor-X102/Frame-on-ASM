@@ -1,65 +1,133 @@
 .model tiny
 .code
 org 100h
+LOCALS @@
+COMMAND_STR_OFFSET equ 81h
+USER_FORMAT_NUM equ 0h
+WINDOW_HEIGHT equ 18h
+VIDEO_MEM_SEGMENT equ 0b800h
+WINDOW_WIDTH equ 50h
+NEW_LINE_SEG_OFFSET equ 0ah
+DEC_BASE equ 0ah
+OFFSET_RATIO equ 5h
 
 Start:
+		call main
+		mov ax, 4c00h
+		int 21h
 
-	mov di, offset Frame_style
-	mov si, offset String
-	mov ax, 14h
-	mov bp, 20h
-	mov dh, 00011100b
-	call Draw_Frame
-	
-	Exit:
-	mov ax, 4c00h
-	int 21h
+;------------------------------------------------
+; main function
+; Entry: from command string
+;		 input format:
+;		 width(hex)
+;		 height(hex)
+;		 colour(hex)
+;		 frame_style_format(from 0 to 9, depends on amount)
+;		 if user_frame_style_format:
+;		 user_frame_style(without '$')
+;		 string_to_write (with '$' at the end)
+;		 else: string_to_write (with '$' at the end)
+; Exit:  None
+;------------------------------------------------
+main	proc
+
+		mov di, COMMAND_STR_OFFSET
+		call Atoi_dec	; Get width
+		mov bp, ax
+		call Atoi_dec	; Get height
+		mov dx, ax
+		call Atoi_hex	; Get colour
+		mov bl, al
+		call Atoi_dec	; Get frame style format
+
+		cmp al, USER_FORMAT_NUM
+
+		je User_format
+
+		mov si, offset Frame_style
+		sub al, 1h		; real indexes start with 0
+		push ax
+		call Skip_spaces
+		pop ax
+		push di			; to get string to write offset
+		mov cl, al		; |
+		shl ax, 3h		; | --> mul 10 (dec) to get frame style
+		add al, cl		; |
+		add al, cl		; |
+		add si, ax
+		mov ah, bl		; puts colour back
+		call Draw_Frame
+		pop si			; gets string to write offset
+		jmp Skip_user_format
+
+		User_format:
+
+		call Skip_spaces
+		mov si, di		; gets user's frame style from command string
+		mov ah, bl		; puts colour back
+		call Draw_Frame
+		inc si			; go to next 'space' symbol
+		push di
+		mov di, si		; Skip_spaces needs di to work with
+		call Skip_spaces
+		mov si, di
+		pop di
+
+		Skip_user_format:
+
+		call Write_String
+
+		ret
+		endp
+;------------------------------------------------
 
 ;------------------------------------------------
 ; Draws a frame with centered text
-; Entry: DI - frame style string, SI - string to
-; 	 output, DH - frame colour, AX - height,
-;	 BP - width
+; Entry: SI - frame style string,
+; 	 	 AH - frame colour, DX - height,
+;	 	 BP - width
 ; Exit:  None
 ; Destr: BX ES CX
 ;------------------------------------------------
 
 Draw_Frame	proc
-		sub ax, 2h
-		sub bp, 2h
-		mov bx, 0b800h
-		mov es, bx
-		mov bx, 0b
-		call Draw_Line
-		inc di
-		push es		 ; savinig initial value of segment
-		mov bx, es
-		add bx, 0ah
-		mov es, bx	 ; 160 bytes - string length
-		mov bx, 0b
-		mov cx, 0b
-	
-		DF_loop_condition:
-		cmp cx, ax
-		jge DF_skip_loop
 
-		push cx
-		push di
+		mov bx, WINDOW_HEIGHT
+		sub bx, dx
+		mov cx, bx
+		shl bx, 2h		; |
+		add bx, cx		; | --> mul 5
+		add bx, VIDEO_MEM_SEGMENT		; with alignment
+		mov es, bx
+
+		mov di, WINDOW_WIDTH
+		sub di, bp		; puts double left border offset, but each symbol is specified by 2 bytes
+
+		sub dx, 2h		; | amount of symbols between borders
+		sub bp, 2h		; |
+
+		push es		; saving initial value of segment
+		call Draw_Line		; drawing highest border
+		mov bx, es
+		add bx, NEW_LINE_SEG_OFFSET
+		mov es, bx	 ; 160 bytes - string length, address += 10 * 16
+
+		mov cx, dx
+@@Loop:		; drawing lines of frame between borders
+		push cx		; saving counter, it uses also in Draw_Line
+		push si		; saving symbols to write
 		call Draw_Line
 		mov bx, es
-		add bx, 0ah
+		add bx, NEW_LINE_SEG_OFFSET
 		mov es, bx
-		mov bx, 0b
-		pop di
+		pop si
 		pop cx
-		inc cx
-		jmp DF_loop_condition
+		loop @@Loop
 
-		DF_skip_loop:
-		add di, 3h
-		call Draw_Line
-		pop es
-		call Write_String
+		add si, 3h		; moving to the last group of symbols
+		call Draw_Line		; drawing lowest border
+		pop es		;get initial video mem offset
 		ret
 		endp
 
@@ -67,206 +135,273 @@ Draw_Frame	proc
 
 ;------------------------------------------------
 ; Draws a line with 3 symbols
-; Entry: DI - string offset with symbols, DH - colour
+; Entry: SI - string offset with symbols, AH - colour,
+;		 BP - width, DI - offset in video-mem segment
 ; Exit: None
-; Destr: DI, BX, CX
+; Destr: BX, CX, SI, AL
 ;------------------------------------------------
 Draw_Line	proc
-		
-		push ax
-		mov ah, [di]
-		mov es:[bx], ah
-		mov es:[bx+1], dh 
-		inc di
-		add bx, 2h
-		mov cx, 0h
-		mov ah, [di]
 
-		DL_loop_condition:
-		cmp cx, bp
-		jge DL_skip_loop
+		mov bx, di		; saving di
+		lodsb
+		stosw		; printing first symbol
 
-		mov es:[bx], ah
-		mov es:[bx+1], dh
-		inc cx
-		add bx, 2h
-		jmp DL_loop_condition
-		DL_skip_loop:
-		
-		inc di
-		mov ah, [di]
-		mov es:[bx], ah
-		mov es:[bx+1], dh
-		pop ax
+		mov cx, bp
+@@Loop:		; printing symbol of frame between
+		mov al, ds:[si]
+		stosw
+		loop @@Loop
+
+		inc si
+		lodsb
+		stosw		; printing last symbol
+		mov di, bx
 		ret
 		endp
 ;------------------------------------------------
 
 ;------------------------------------------------
-; Prints string
-; Entry: SI - string offset, AX - height, BP -
-;	 width, DH - colour
+; Prints a string
+; Entry: SI - string offset, DX - height, BP -
+;	 width, AH - colour, DI - offset in video-mem segment,
 ; Exit:  None
-; Destr: AX, BX, CX, DX, BP, DI
+; Destr: BX, CX, DX, DI
 ;------------------------------------------------
 
 Write_String	proc
 
-		mov ch, dh
-		mov dx, 0h
-		mov bx, 5h	;10*16*center
-		mul bx
+		push ax
+		mov ax, dx
+		mov bx, ax		;
+		shl ax, 2h		; |
+		add ax, bx		; | --> mul 5, addr += height/2 * 160 = height * 80 = (height * 16) * 5
 		mov bx, es
 		add ax, bx
-		mov es, ax
+		mov es, ax		; es aligned to the center of window
+
 
 		mov ax, bp
-		mov bx, 5h
-		div bx 		;1/5 - offsets
+		mov dx, 0h
+		mov bx, OFFSET_RATIO
+		div bx	; |--> div 5. sum of offsets to string length ratio is 1 to 5
+
+
 		mov bx, bp
-		sub bx, ax
-		push si
-		call Str_Len
-		pop si
-		
-		cmp ax, bx	; ax - real length, bx - needed lenth of line
-		jg WS_line_break  ; was jg
-
-				;No line break
-		mov bx, ax
-		mov ax, bp
-		sub ax, bx
-		mov bx, ax
-		add bx, 2h
-		
-		WS_loop0_condition:
-		cmp byte ptr [si], '$'
-		je WS_loop0_skip
-
-		mov ah, [si]
-		mov es:[bx], ah
-		mov es:[bx+1], ch
-		add bx, 2h
-		inc si
-
-		jmp WS_loop0_condition
-		WS_loop0_skip:
-
-		jmp WS_skip		;end no line break
-
-
-		WS_line_break:
-		
-		
-		push ax
-		mov ax, bp
-		sub ax, bx
-		mov di, ax		; counting offset neede for bx
-		
-		pop ax
+		sub bx, ax		; bx now is a length of aligned line in frame
 		push di
-		
-		mov dx, 0h
-		div bx
-		mov di, ax		; inerations amount
-		
-		mov ax, bx
-		mov dx, 2h
-		mul dx
-		pop bx
+		mov di, si
+		call Str_Len
+		pop di
+		mov dx, cx
+		cmp dx, bx	; dx - real length of string
+		jg @@Line_break
+
+		mov bx, dx		;No line break
+		mov ax, bp
+		sub ax, bx
+		mov bx, ax
 		add bx, 2h
-		add ax, bx
-		mov bp, ax
-		mov dx, 0h
-		WS_loop1_condition:
-		cmp dx, di
-		jge WS_loop1_skip
+		and bx, 0feh	; mask of 11111110b to make di even
+		add di, bx		; offset to video mem to align string
 
-		push bx
-		call Write_Line
-		pop bx
-		mov ax, es
-		add ax, 0ah
-		mov es, ax
-		inc dx
-		jmp WS_loop1_condition
+		pop ax			; get back colour
 
-		WS_loop1_skip:
-
-		WS_loop2_condition:
+		@@Loop0_condition:		; Loop printing string until '$' symbol
 		cmp byte ptr [si], '$'
-		je WS_loop2_skip
+		je @@Loop0_skip
 
-		mov ah, [si]
-		mov es:[bx], ah
-		mov es:[bx+1], ch
-		add bx, 2h
-		inc si		
-		jmp WS_loop2_condition
+		lodsb
+		stosw
 
-		WS_loop2_skip:
-		WS_skip:
-;		WS_line_break:
+		jmp @@Loop0_condition
+		@@Loop0_skip:
+
+		jmp @@Skip		;end No line break
+
+
+		@@Line_break:
+
+		mov ax, dx
+		mov dx, 0h
+		div bx			; (amount of full lines to write) = real length of string / aligned size of line
+		mov cx, ax		; (amount of lines to write) - 1
+		mov ax, bp
+		sub ax, bx
+		add ax, 4h
+		and ax, 0feh	; mask of 11111110b to make di even
+		dec bx
+		add di, ax	; counting offset needed for di
+		pop ax
+
+@@Loop1:
+		push di
+		call Write_Line
+		pop di
+		mov dx, es
+		add dx, 0ah
+		mov es, dx
+		loop @@Loop1
+
+		@@Loop2_condition:		;printing remaining part of string
+		cmp byte ptr [si], '$'
+		je @@Loop2_skip
+
+		lodsb
+		stosw
+		jmp @@Loop2_condition
+
+		@@Loop2_skip:
+		@@Skip:
+
 		ret
 		endp
 ;------------------------------------------------
+
+
 
 ;------------------------------------------------
 ; Prints 1 line
-; Entry: 
-;
-;
+; Entry: SI - string offset, BX - aligned size of string
+;	     AH - colour, DI - offset in video-mem segment,
+; Exit:
+; Destr: SI, DI
 ;------------------------------------------------
 Write_Line	proc
 
-		WL_loop_condition:
-		cmp bx, bp
- 		jge WL_skip_loop
-		
-		mov ah, [si]
-		mov es:[bx], ah
-		mov es:[bx+1], ch
-		add bx, 2h
-		inc si
-		jmp WL_loop_condition
-		
-		WL_skip_loop:
+		push cx
+		mov cx, bx
+WL_loop:
+		lodsb
+		stosw
+		loop WL_loop
+
+		pop cx
 		ret
 		endp
 ;------------------------------------------------
-
-
-;--------------------------------------
-;I    Some Huuuuuge teeeeeextttttt    I
 
 
 
 ;------------------------------------------------
 ; Counts string's length
-; Entry: SI - string offset
-; Exit: AX - length
-; Destr: AX
+; Entry: DI - string offset
+; Exit: CX - length
+; Destr: AL, CX, DI
 ;------------------------------------------------
 
 Str_Len		proc
-		
-		mov ax, 0h
-		SL_loop_condition:
-		cmp byte ptr [si], '$'
-		je SL_skip
-		
-		inc ax
-		inc si		
 
-		jmp SL_loop_condition
-		SL_skip:
+		CLD
+		mov cx, ds
+		push es
+		mov es, cx
+		mov al, '$'
+		mov cx, 0ffffh
+		repne scasb
+		neg cx
+		dec cx
+		pop es
 		ret
 		endp
 ;------------------------------------------------
 
 
-Frame_style: db  '+-+I I\_/$'
-String: db 'One Piece is REEEEAAAAALLLL!!!$'
+
+;------------------------------------------------
+; Atoi_dec
+; Entry: DI - string with number offset
+; Exit: AX - number
+; Destr: AX, DI, BH
+;------------------------------------------------
+
+Atoi_dec	proc
+
+			call Skip_spaces
+			mov al, [di]
+			sub al, '0'		; gets first symbol
+			inc di
+			@@cond:		; gets symbols until 'space'
+			cmp byte ptr [di], ' '
+			je @@skip_loop
+
+			mov bh, DEC_BASE
+			mul bh
+			add al, [di]
+			sub al, '0'
+			inc di
+			jmp @@cond
+
+			@@skip_loop:
+			ret
+			endp
+;------------------------------------------------
+
+;------------------------------------------------
+; Atoi_hex
+; Entry: DI - string with number offset
+; Exit: AX - number
+; Destr: AX, DI, BH
+;------------------------------------------------
+
+Atoi_hex	proc
+
+
+			call Skip_spaces
+			mov ax, 0h
+			mov al, [di]
+			sub al, '0'		; gets first symbol
+			inc di
+			@@cond:
+			cmp byte ptr [di], ' '
+			je @@skip_loop
+
+			cmp byte ptr [di], 'a'		; checks digit or letter
+
+			shl ax, 4h		; mul 16 = HEX_BASE
+			add al, [di]
+			inc di
+
+			jge @@let_2_cond
+
+			sub al, '0'
+			jmp @@cond
+
+			@@let_2_cond:
+
+			sub al, 'W'		; <=> sub ax, ('a' - 10d)
+			jmp @@cond
+
+			@@skip_loop:
+			ret
+			endp
+;------------------------------------------------
+
+;------------------------------------------------
+; Skips spaces
+; Entry: DI - string to skip offset
+; Exit: None
+; Destr: AL, CX
+;------------------------------------------------
+
+Skip_spaces		proc
+
+			mov cx, ds
+			push es
+			mov es, cx
+			mov cx, 0ffffh
+			mov al, ' '
+			repe scasb
+			sub di, 1h		; IDK why repe scasb does 1 extra iteration
+			pop es
+			ret
+			endp
+;------------------------------------------------
+
+
+
+Frame_style: db '+-+I I\_/$'
+			 db 3h, 3h, 3h, 3h, ' ', 3h, 3h, 3h, 3h, '$'
+String: db 'One Piece is REEEEEEEAAAAALLLLL!!!$'
 ;String: db 'A$'
 
 end Start
